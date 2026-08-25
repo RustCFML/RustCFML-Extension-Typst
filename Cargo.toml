@@ -1,0 +1,36 @@
+[package]
+name         = "rustcfml-typst"
+version      = "0.1.0"
+edition      = "2021"
+rust-version = "1.85"
+license      = "MIT OR Apache-2.0"
+description  = "Typst-backed document generation for RustCFML — a fluent Document() builder and <cfdocument> support, as a native module."
+repository   = "https://github.com/RustCFML/rustcfml-typst"
+readme       = "README.md"
+keywords     = ["cfml", "rustcfml", "typst", "pdf", "cfdocument"]
+categories   = ["template-engine"]
+
+[lib]
+# `rlib` is the contract `rustcfml --build` links (the "cocktail" path) and is
+# what works TODAY. `cdylib` is for the `.rcx` dynamic loader once its C ABI
+# lands — see docs/PLAN.md. Building both from one crate keeps the two delivery
+# modes on the same code.
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+# Point this at your RustCFML checkout. Once rustcfml-cli ships on crates.io
+# this becomes a version dependency.
+rustcfml-cli = { path = "../RustCFML/crates/cli" }
+
+# Typst. Apache-2.0 throughout, already inside RustCFML's accepted licence set.
+typst         = "0.15"
+typst-library = "0.15"
+typst-layout  = "0.15"
+typst-pdf     = "0.15"
+# System fonts. Typst needs real faces; see docs/PLAN.md on why they are not
+# embedded (typst-assets is 6.7 MB and its fonts are OFL-1.1, which is NOT in
+# RustCFML's accepted list).
+fontdb = "0.24"
+
+[profile.release]
+opt-level = 3
