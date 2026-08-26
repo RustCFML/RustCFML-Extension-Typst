@@ -8,7 +8,7 @@
 //! `#import`-ing its way there. That is a security property, not an omission:
 //! the markup being compiled is frequently assembled from application data.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Duration};
@@ -55,10 +55,19 @@ pub fn font_count() -> usize {
 pub struct CfmlWorld {
     library: LazyHash<Library>,
     main: Source,
+    /// Virtual name -> bytes, for images the builder embedded. This is the ONLY
+    /// way a document reaches binary data: the module reads the file (or is
+    /// handed a Binary) on the CFML side and registers it here, so `file()`
+    /// still cannot be talked into opening an arbitrary path.
+    files: Vec<(String, Bytes)>,
 }
 
 impl CfmlWorld {
     pub fn new(markup: &str) -> Self {
+        Self::with_files(markup, &[])
+    }
+
+    pub fn with_files(markup: &str, files: &[(String, Vec<u8>)]) -> Self {
         let id = FileId::new(RootedPath::new(
             VirtualRoot::Project,
             VirtualPath::new("main.typ").expect("a literal filename is always valid"),
@@ -66,6 +75,10 @@ impl CfmlWorld {
         Self {
             library: LazyHash::new(Library::default()),
             main: Source::new(id, markup.to_string()),
+            files: files
+                .iter()
+                .map(|(name, bytes)| (name.clone(), Bytes::new(bytes.clone())))
+                .collect(),
         }
     }
 }
@@ -90,7 +103,11 @@ impl World for CfmlWorld {
         }
     }
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        Err(FileError::NotFound(id.vpath().as_rootless_path().into()))
+        let wanted = id.vpath().as_rootless_path().to_string_lossy().to_string();
+        match self.files.iter().find(|(name, _)| *name == wanted) {
+            Some((_, bytes)) => Ok(bytes.clone()),
+            None => Err(FileError::NotFound(id.vpath().as_rootless_path().into())),
+        }
     }
     fn font(&self, index: usize) -> Option<Font> {
         fonts().faces.get(index).cloned()
@@ -104,7 +121,12 @@ impl World for CfmlWorld {
 
 /// Compile Typst markup to PDF bytes.
 pub fn compile_pdf(markup: &str) -> Result<Vec<u8>, String> {
-    let world = CfmlWorld::new(markup);
+    compile_pdf_with_files(markup, &[])
+}
+
+/// Compile Typst markup to PDF bytes, with `files` available to `#image(...)`.
+pub fn compile_pdf_with_files(markup: &str, files: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
+    let world = CfmlWorld::with_files(markup, files);
     let compiled = typst::compile::<typst_layout::PagedDocument>(&world);
     let doc = compiled.output.map_err(|diags| {
         let mut out = String::from("Typst could not compile this document:");
@@ -126,7 +148,12 @@ pub fn compile_pdf(markup: &str) -> Result<Vec<u8>, String> {
 
 /// Page count without exporting, for callers that only want to know.
 pub fn page_count(markup: &str) -> Result<usize, String> {
-    let world = CfmlWorld::new(markup);
+    page_count_with_files(markup, &[])
+}
+
+/// Page count without exporting, with `files` available to `#image(...)`.
+pub fn page_count_with_files(markup: &str, files: &[(String, Vec<u8>)]) -> Result<usize, String> {
+    let world = CfmlWorld::with_files(markup, files);
     typst::compile::<typst_layout::PagedDocument>(&world)
         .output
         .map(|d| d.pages().len())
@@ -134,7 +161,3 @@ pub fn page_count(markup: &str) -> Result<usize, String> {
             d.iter().next().map(|x| x.message.to_string()).unwrap_or_else(|| "compile failed".into())
         })
 }
-
-/// Keep the unused-import lint honest about `Arc` while the module is a stub.
-#[allow(dead_code)]
-fn _arc_is_used(_: Arc<()>) {}

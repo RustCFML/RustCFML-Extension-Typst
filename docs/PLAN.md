@@ -112,6 +112,14 @@ and `counter(page)`, which is a genuinely good fit.
 
 ## 5. Phase order
 
+**Phases 1-3 are DONE** (2026-08-26) — the builder, the escaping/injection
+tests, and images/headers/footers/styling all shipped together, because the
+escaping decision (everything is a Typst *string literal*, every verb is code
+mode) made the styling verbs fall out for free. See `docs/document-api.md`.
+Phase 1 also turned up two engine bugs, both fixed in RustCFML v0.635.0-dev:
+named arguments were dropped on a native class's methods, and `rustcfml --build`
+embedded its own previous output.
+
 1. **Fluent builder, core verbs** — page setup, headings, paragraphs, tables from
    a query, page breaks, `.write`/`.toBinary`/`.toTypst`. Tests + a real invoice.
 2. **Escaping and injection tests** — before anything user-facing ships.

@@ -15,6 +15,9 @@
 //! bin = TypstCompile( "= Hello#linebreak()World" );   // PDF bytes
 //! ```
 
+mod document;
+mod emit;
+mod model;
 mod world;
 
 use rustcfml_cli::{CfmlError, CfmlResult, Value, Vm};
@@ -25,6 +28,11 @@ use rustcfml_cli::{CfmlError, CfmlResult, Value, Vm};
 /// The `.rcx` dynamic path will add a separate `extern "C"` entry point beside
 /// this one, over the same functions — see `docs/PLAN.md` §"Two delivery modes".
 pub fn register(vm: &mut Vm) {
+    // The fluent builder — the surface application code should reach for.
+    vm.register_native_fn("Document", document::fn_document);
+    vm.register_native_fn("isDocumentObject", document::fn_is_document_object);
+
+    // The raw Typst surface, for callers who want to hand-write markup.
     vm.register_native_fn("typstCompile", typst_compile);
     vm.register_native_fn("typstPageCount", typst_page_count);
     vm.register_native_fn("typstFontCount", typst_font_count);
