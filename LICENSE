@@ -1,0 +1,41 @@
+rustcfml-typst — licensing
+==========================
+
+This extension's own source code is dual-licensed, at your option, under
+either of:
+
+  * Apache License, Version 2.0 — see LICENSE-APACHE
+  * MIT License                 — see LICENSE-MIT
+
+SPDX: `MIT OR Apache-2.0`.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this work shall be dual-licensed as above, without
+any additional terms or conditions.
+
+
+Software this extension is built on
+-----------------------------------
+
+This project is a thin layer over other people's work, and the dual licence
+above covers only the layer. Two credits are owed, and the second one carries
+an obligation:
+
+**Typst** — the typesetting engine that does the actual work here. Copyright
+The Typst Project Developers, licensed under the Apache License, Version 2.0.
+https://github.com/typst/typst
+
+**RustCFML** — the CFML engine this extends, and the `.rcx` extension ABI it
+is written against. Copyright the RustCFML Team, MIT licensed.
+https://github.com/RustCFML/RustCFML
+
+A built `.rcx` is not source: it is a compiled shared library that **statically
+links Typst and roughly ninety other Rust crates**. Distributing one therefore
+carries those crates' notice obligations — Apache-2.0 §4 for Typst among
+others. The complete set of notices is reproduced in THIRD-PARTY.txt, which is
+generated from the resolved dependency graph and packaged inside every `.rcx`.
+See NOTICE for the short form.
+
+No font files are distributed with this extension. Typst is given the host
+operating system's fonts at run time; `typst-assets` and its OFL-1.1 faces are
+deliberately not bundled.

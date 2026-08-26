@@ -1,0 +1,55 @@
+# cargo-about configuration — drives generation of THIRD-PARTY.txt.
+#
+#   ./scripts/gen-licenses.sh
+#
+# WHY THIS EXISTS: a published `.rcx` is a compiled shared library that
+# statically links Typst and ~90 other Rust crates. MIT/BSD/ISC-style terms
+# require the copyright notice and licence text to travel with that binary;
+# Apache-2.0 additionally requires NOTICE contents. Shipping a bare `.rcx` with
+# no notices does not satisfy those conditions, so the notice file is generated,
+# committed, and packaged INSIDE the archive by `rustcfml ext build`.
+
+# Every target the release workflow publishes an artifact for. Crates resolve
+# per-target, so omitting one silently drops its platform-specific dependencies
+# from the notice file.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+# Build- and dev-dependencies are not linked into the shipped library.
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# This crate and the RustCFML wrapper it depends on are covered by LICENSE.
+private = { ignore = true }
+
+# ORDER MATTERS: for a crate licensed "MIT OR Apache-2.0", cargo-about takes the
+# first entry here that satisfies the expression. MIT first keeps the file short.
+#
+# A licence in this list is an assertion that its obligations have been reviewed
+# and accepted. The set is deliberately narrower than the engine's: this
+# dependency graph is Typst's, not the engine's.
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "0BSD",
+    "MIT-0",
+    "BSL-1.0",
+    "Unlicense",
+    "CC0-1.0",
+    "OFL-1.1",
+    "Unicode-3.0",
+    # Weak, file-level copyleft. Anything landing here is used UNMODIFIED, which
+    # satisfies MPL-2.0 §3.2 via the crate + version + upstream repository
+    # recorded per crate in the generated file. If you ever patch or vendor one,
+    # a notice file alone is NOT sufficient.
+    "MPL-2.0",
+]

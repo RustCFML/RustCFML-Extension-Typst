@@ -1,0 +1,13 @@
+rustcfml-typst
+Copyright 2026 RustCFML Team
+
+This product includes software developed by The Typst Project Developers
+(https://github.com/typst/typst), licensed under the Apache License,
+Version 2.0.
+
+This product is built against RustCFML (https://github.com/RustCFML/RustCFML),
+copyright the RustCFML Team, MIT licensed.
+
+A compiled `.rcx` statically links Typst and its transitive dependencies.
+Full third-party license texts and per-crate copyright notices are in
+THIRD-PARTY.txt, which is packaged inside the `.rcx` alongside this file.
