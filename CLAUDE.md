@@ -94,6 +94,17 @@ checks green at the time. **If a change affects layout, render it.**
 ⚠️ Small renders show *fake* letter-spacing ("Widget,   large"). Verified against
 the 1400px render and the PDF's glyph stream — don't chase it.
 
+**Measure memory with `vmmap -summary`, not `ps`.** `ps` RSS showed 5.8 MB for
+processes Activity Monitor reported at 3.26 GB — macOS charges swapped-out dirty
+pages, and `ps` counts only resident ones. `vmmap -summary $PID` gives the
+**Physical footprint** (the Activity Monitor number) *and* a region table saying
+where it went. That is how the font loader's 2.9 GB of `MALLOC_LARGE` was found.
+On Apple Silicon this is unified memory, so a large footprint is real RAM.
+
+Recipe for "does it leak?": start `--serve`, probe, then N requests per phase,
+probing between phases. Font data plateaus at ~220 MB and stays flat over 600
+requests — a plateau is not a leak.
+
 **Test in Docker, on a fontless image.** `rust:1-slim` has **zero fonts**, and
 Typst does not fail on that — it compiles happily and writes a PDF with zero
 text-showing operators and zero embedded fonts. A blank page, successfully.
@@ -120,6 +131,11 @@ compiles perfectly well.
   default**, so `pages=` alone always failed. Refused at `.pdf()` now, naming the
   fix. Do not silently disable tagging — dropping accessibility is the caller's
   call.
+- ⭐⭐⭐**`fontdb::with_face_data` hands you the whole FILE, not the face.** Never
+  build a `Font` per face from it: a `.ttc` is one file with many faces, so that
+  copies the file once per face. 904 faces = **3.4 GB at start-up**. Use
+  `FontInfo::new(data, index)`, which *borrows*, and load the `Font` lazily.
+  `world::startup_holds_font_metadata_only` is the regression test.
 - The ABI type constant is `ty::BOOL`, not `ty::BOOLEAN`.
 - Docker Desktop bind mounts on macOS are **case-insensitive**: a file named
   `rustcfml` beside a mounted `RustCFML/` resolves to the directory.

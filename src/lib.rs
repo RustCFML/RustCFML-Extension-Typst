@@ -114,9 +114,12 @@ fn typst_render<'a>(ctx: &'a Ctx, args: &[Value<'a>]) -> Result<Value<'a>> {
     Ok(ctx.binary(&pdf))
 }
 
-/// Once per process, before any request. Enumerating the host's fonts took
-/// ~2.1 s for 904 faces on the development machine; doing it here means no
-/// request ever pays for it, which is exactly what `on_load` is for.
+/// Once per process, before any request. Enumerating and parsing the host's
+/// fonts costs ~0.25 s for 904 faces on the development machine; doing it here
+/// means no request ever pays for it, which is exactly what `on_load` is for.
+///
+/// It used to cost ~2.1 s and 3.4 GB, because it built a `Font` per face and so
+/// copied each font FILE once per face in it. See `world::Fonts`.
 fn warm_fonts(_ctx: &Ctx, _settings: Value) -> Result<()> {
     let _ = world::font_count();
     Ok(())

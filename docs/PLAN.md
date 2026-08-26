@@ -11,7 +11,7 @@ end to end inside a native module.
 |---|---|
 | Typst embeds cleanly | `World` is **7 methods**; `src/world.rs` implements it in ~140 lines |
 | It is fast | compile **~6 ms**, PDF export **~2 ms** for a 2-page invoice with a table |
-| Fonts are the only slow part | ~2.1 s for 904 system faces — loaded **once** into a `OnceLock` |
+| Fonts are the only slow part | ~0.25 s for 904 system faces — metadata **once** into a `OnceLock`, data lazily (was 2.1 s / 3.4 GB before the loader was fixed) |
 | Licence is fine | Typst is Apache-2.0; all 93 new crates sit inside RustCFML's accepted set |
 | The cost is real | **+31.6 MB** on the engine binary (56.0 → 87.6). Hence: a module |
 | The module path works | `rustcfml --build` produces a bespoke binary that compiles Typst → PDF |

@@ -26,7 +26,7 @@ use std::sync::{Mutex, OnceLock};
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Duration};
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
-use typst::text::{Font, FontBook};
+use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 
@@ -69,14 +69,31 @@ fn check_fonts(job: &Job) -> Result<(), String> {
     Ok(())
 }
 
-/// The system font set, loaded exactly once per process.
+/// The host's font set: metadata for every face, data for the faces actually
+/// used.
 ///
-/// Enumerating and parsing the host's fonts took ~2.1 s for 904 faces on the
-/// development machine. Per call that would dominate everything else the module
-/// does, so it is built on first use and shared thereafter.
+/// ⚠️ **Do not go back to holding a `Font` per face.** The first version of this
+/// did, built as `Font::new(Bytes::new(data.to_vec()), index)` in a loop over
+/// `db.faces()` — and `with_face_data` hands you the whole FILE, so every face
+/// of a `.ttc` collection copied the entire collection again. `Songti.ttc` is
+/// 63.8 MB and holds several faces; `/System/Library/Fonts` is 566 MB in total.
+/// Measured on a Mac with 904 faces: **3.4 GB resident at start-up, 2.9 GB of it
+/// MALLOC_LARGE**, before a single request. On Apple Silicon that is unified
+/// memory, so it is not an accounting curiosity — it filled the machine.
+///
+/// So: parse each face once to get its `FontInfo` for the book, then **drop the
+/// data**. `World::font()` reconstructs a `Font` on demand and memoises it, so
+/// steady state holds only the handful of faces a document actually renders.
 struct Fonts {
+    /// Face metadata for matching and fallback. Cheap; no glyph data.
     book: LazyHash<FontBook>,
-    faces: Vec<Font>,
+    /// Book slot -> the fontdb face it came from. `fontdb` keeps a `Source`
+    /// (a path for system fonts) rather than the bytes, and reads on demand.
+    ids: Vec<fontdb::ID>,
+    db: fontdb::Database,
+    /// Book slot -> constructed font. `World::font` takes `&self`, and Typst
+    /// asks for the same face repeatedly within one compile.
+    loaded: Mutex<HashMap<usize, Font>>,
 }
 
 fn fonts() -> &'static Fonts {
@@ -85,26 +102,55 @@ fn fonts() -> &'static Fonts {
         let mut db = fontdb::Database::new();
         db.load_system_fonts();
         let mut book = FontBook::new();
-        let mut faces = Vec::new();
-        for face in db.faces() {
-            if let Some((data, index)) = db.with_face_data(face.id, |d, idx| (d.to_vec(), idx)) {
-                if let Some(f) = Font::new(Bytes::new(data), index) {
-                    book.push(f.info().clone());
-                    faces.push(f);
-                }
+        let mut ids = Vec::new();
+        let face_ids: Vec<fontdb::ID> = db.faces().map(|f| f.id).collect();
+        for id in face_ids {
+            // `FontInfo::new` BORROWS the data — no `Font`, no `Bytes`, no
+            // copy. Building a throwaway `Font` here instead worked, but left
+            // ~420 MB of freed-but-retained MALLOC_LARGE arenas behind: the
+            // transient buffers are up to 64 MB each and the allocator does not
+            // hand that back to the OS. Startup now allocates nothing per face.
+            //
+            // The parse itself is unavoidable: `FontInfo` carries the coverage
+            // bitmaps Typst needs for fallback, so it cannot be synthesised from
+            // fontdb's own metadata.
+            let info = db.with_face_data(id, FontInfo::new);
+            if let Some(Some(info)) = info {
+                book.push(info);
+                ids.push(id);
             }
         }
         Fonts {
             book: LazyHash::new(book),
-            faces,
+            ids,
+            db,
+            loaded: Mutex::new(HashMap::new()),
         }
     })
+}
+
+impl Fonts {
+    /// The font in book slot `index`, loading and memoising it on first use.
+    fn font(&self, index: usize) -> Option<Font> {
+        if let Some(hit) = self.loaded.lock().ok().and_then(|c| c.get(&index).cloned()) {
+            return Some(hit);
+        }
+        let id = *self.ids.get(index)?;
+        let font = self
+            .db
+            .with_face_data(id, |data, face| Font::new(Bytes::new(data.to_vec()), face))
+            .flatten()?;
+        if let Ok(mut cache) = self.loaded.lock() {
+            cache.insert(index, font.clone());
+        }
+        Some(font)
+    }
 }
 
 /// How many font faces the host offers. Exposed so a caller can tell "no fonts
 /// installed" apart from "my markup was wrong".
 pub fn font_count() -> usize {
-    fonts().faces.len()
+    fonts().ids.len()
 }
 
 pub struct CfmlWorld {
@@ -240,7 +286,7 @@ impl World for CfmlWorld {
             .map_err(|e| FileError::from_io(e, &path))
     }
     fn font(&self, index: usize) -> Option<Font> {
-        fonts().faces.get(index).cloned()
+        fonts().font(index)
     }
     fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {
         // Left to the caller: a document that stamps "today" should be given the
@@ -478,6 +524,43 @@ fn datetime_from_epoch(epoch: i64) -> Result<Datetime, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_holds_font_metadata_only() {
+        // The regression test for a 3.4 GB start-up. Holding a `Font` per face
+        // copied the whole FILE per face (a `.ttc` is one file, many faces), so
+        // 904 faces on a developer Mac meant 2.9 GB of MALLOC_LARGE before a
+        // single request — and on Apple Silicon that is unified memory.
+        //
+        // The invariant: building the book loads NO font data. Data arrives only
+        // when a face is actually asked for, and is memoised.
+        let f = fonts();
+        if f.ids.is_empty() {
+            // A host with no fonts installed — nothing to assert about lazy
+            // loading, and `check_fonts` covers that case separately.
+            return;
+        }
+        assert!(
+            f.loaded.lock().unwrap().is_empty(),
+            "building the font book must not load any font data"
+        );
+
+        assert!(f.font(0).is_some(), "face 0 should load on demand");
+        assert_eq!(
+            f.loaded.lock().unwrap().len(),
+            1,
+            "asking for one face must load exactly one"
+        );
+
+        // A second ask is served from the cache, not reloaded.
+        assert!(f.font(0).is_some());
+        assert_eq!(f.loaded.lock().unwrap().len(), 1);
+
+        assert!(
+            f.font(usize::MAX).is_none(),
+            "an unknown slot is None, not a panic"
+        );
+    }
 
     #[test]
     fn epoch_zero_is_the_unix_epoch() {

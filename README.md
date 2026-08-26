@@ -248,6 +248,15 @@ offers.
 > On Debian or Ubuntu, `fonts-dejavu-core` is enough. Slim container images
 > generally ship none.
 
+Font **metadata** for every face is read once at load (~0.25 s for 904 faces on
+a developer Mac); the **data** for a face is read only when a document actually
+renders with it, and memoised. That distinction matters: an earlier version held
+a parsed `Font` per face, and because a face's data is its whole *file* — a
+`.ttc` collection is one file with many faces — it copied `Songti.ttc`'s 64 MB
+once per face it contained. The result was **3.4 GB resident before serving a
+single request**, which on Apple Silicon is unified memory and duly filled the
+machine. Steady state under sustained load is now ~220 MB.
+
 ## Licence
 
 This extension's own code is dual-licensed **MIT OR Apache-2.0** — see
