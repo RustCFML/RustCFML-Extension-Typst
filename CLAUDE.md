@@ -23,7 +23,7 @@ dependency, not a crates.io one:
 
 ```
 some-dir/
-  RustCFML/                   # v0.635.1 or later
+  RustCFML/                   # v0.635.2 or later
   RustCFML-Extension-Typst/   # this repo
 ```
 

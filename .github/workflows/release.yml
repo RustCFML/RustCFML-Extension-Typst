@@ -18,7 +18,7 @@ env:
   # `main` would mean a tag of this repo produces different bytes depending on
   # the day. It also documents the floor honestly — this is the oldest engine
   # the produced .rcx is known to load into. Bump it deliberately.
-  RUSTCFML_REF: v0.635.1
+  RUSTCFML_REF: v0.635.2
 
 jobs:
   # One job per platform, each producing a SINGLE-PLATFORM .rcx.

@@ -7,7 +7,7 @@ on:
 
 env:
   # Kept in step with release.yml. See the note there on why this is pinned.
-  RUSTCFML_REF: v0.635.1
+  RUSTCFML_REF: v0.635.2
 
 jobs:
   test:

@@ -204,7 +204,7 @@ RustCFML checkout beside it:
 
 ```
 some-dir/
-  RustCFML/                   # git clone, at v0.635.1 or later
+  RustCFML/                   # git clone, at v0.635.2 or later
   RustCFML-Extension-Typst/   # this repo
 ```
 
