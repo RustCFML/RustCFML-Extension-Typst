@@ -86,15 +86,20 @@ jobs:
       - name: Fetch the released engine
         shell: bash
         run: |
+          # NOT `--output rustcfml`: the engine is checked out into a
+          # directory called `RustCFML/`, and macOS and Windows runners have
+          # CASE-INSENSITIVE filesystems, so `rustcfml` collides with it and
+          # `gh` refuses with "rustcfml already exists". Only the Linux jobs
+          # survived that. Name it something that cannot collide.
           gh release download "$RUSTCFML_REF" \
             --repo RustCFML/RustCFML \
             --pattern '${{ matrix.engine }}' \
-            --output "rustcfml${{ matrix.exe }}"
-          chmod +x "rustcfml${{ matrix.exe }}"
-          ./rustcfml${{ matrix.exe }} --version
+            --output "engine${{ matrix.exe }}"
+          chmod +x "engine${{ matrix.exe }}"
+          ./engine${{ matrix.exe }} --version
           # Prints the ABI major and triple this engine speaks; the packaged
           # manifest must agree, and the log is where you look when it doesn't.
-          ./rustcfml${{ matrix.exe }} ext --help
+          ./engine${{ matrix.exe }} ext --help
         env:
           GH_TOKEN: ${{ github.token }}
 
@@ -107,7 +112,7 @@ jobs:
       # comment is why.
       - name: Build and package the .rcx
         shell: bash
-        run: ./rustcfml${{ matrix.exe }} ext build rustcfml-typst
+        run: ./engine${{ matrix.exe }} ext build rustcfml-typst
 
       # Loading it is the only check that means anything. A .rcx can be
       # perfectly well-formed and still fail to load — a missing system library,
@@ -124,8 +129,8 @@ jobs:
           RCX=$(ls rustcfml-typst/*.rcx)
           # The default install location is ./extensions, which is also the
           # first place a CLI run looks for the script's application directory.
-          ./rustcfml${{ matrix.exe }} ext install "$RCX"
-          ./rustcfml${{ matrix.exe }} ext list
+          ./engine${{ matrix.exe }} ext install "$RCX"
+          ./engine${{ matrix.exe }} ext list
 
           # Deliberately font-free: `toTypst()` exercises the whole builder —
           # the class registration, named-argument binding, the emitter — with
@@ -176,7 +181,7 @@ jobs:
           writeOutput( "font faces visible to this host: #typstFontCount()#" & chr( 10 ) );
           </cfscript>
           CFM
-          ./rustcfml${{ matrix.exe }} smoke.cfm
+          ./engine${{ matrix.exe }} smoke.cfm
 
       - name: Name the artifact for its platform
         shell: bash

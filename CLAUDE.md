@@ -141,8 +141,14 @@ compiles perfectly well.
   `FontInfo::new(data, index)`, which *borrows*, and load the `Font` lazily.
   `world::startup_holds_font_metadata_only` is the regression test.
 - The ABI type constant is `ty::BOOL`, not `ty::BOOLEAN`.
-- Docker Desktop bind mounts on macOS are **case-insensitive**: a file named
-  `rustcfml` beside a mounted `RustCFML/` resolves to the directory.
+- ⭐⭐**macOS and Windows filesystems are CASE-INSENSITIVE, and the engine is
+  checked out as `RustCFML/`.** Never name a file `rustcfml` beside it — Docker
+  Desktop bind mounts resolve it to the directory, and on a macOS/Windows CI
+  runner `gh release download --output rustcfml` refuses with "rustcfml already
+  exists". The Linux jobs pass, so it looks like a platform-specific build
+  failure when it is a filename collision. The workflows download the engine as
+  `engine` for this reason. Cost: one red macOS job after the same trap had
+  already been hit in Docker and written down here.
 
 ## Adding a verb
 
