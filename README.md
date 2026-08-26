@@ -172,7 +172,7 @@ This is a **`.rcx` extension**: precompiled Rust that a *stock* `rustcfml`
 binary loads at start-up. No engine rebuild, no toolchain on the server.
 
 Take the file for **your platform** from the
-[latest release](https://github.com/RustCFML/Extension-Typst/releases) — one of
+[latest release](https://github.com/RustCFML/RustCFML-Extension-Typst/releases) — one of
 `typst-<version>-{macos-aarch64,linux-x86_64,linux-aarch64,windows-x86_64}.rcx`
 — and install it:
 

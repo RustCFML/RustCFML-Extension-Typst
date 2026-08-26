@@ -23,9 +23,13 @@ dependency, not a crates.io one:
 
 ```
 some-dir/
-  RustCFML/            # v0.635.1 or later
-  Extension-Typst/     # this repo
+  RustCFML/                   # v0.635.1 or later
+  RustCFML-Extension-Typst/   # this repo
 ```
+
+Only the `RustCFML/` sibling's name matters — the path dependency is
+`../RustCFML/crates/rustcfml-module`, so this directory can be called anything.
+CI checks it out as `rustcfml-typst`.
 
 ```bash
 cargo test                       # 24 Rust unit tests — emit/validation/date maths
