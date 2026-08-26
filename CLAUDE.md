@@ -1,4 +1,4 @@
-# rustcfml-typst — Claude Code guide
+# RustCFML Extension: Typst — Claude Code guide
 
 Typst-backed document generation for [RustCFML](https://github.com/RustCFML/RustCFML),
 shipped as a dynamically loaded `.rcx` extension. Read this before changing

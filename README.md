@@ -1,4 +1,4 @@
-# rustcfml-typst
+# RustCFML Extension: Typst
 
 Document generation for [RustCFML](https://github.com/RustCFML/RustCFML), backed by
 [Typst](https://github.com/typst/typst) — a fluent `Document()` builder and
@@ -204,10 +204,12 @@ RustCFML checkout beside it:
 
 ```
 some-dir/
-  RustCFML/          # git clone, at v0.635.1 or later
-  rustcfml-typst/    # this repo
+  RustCFML/                   # git clone, at v0.635.1 or later
+  RustCFML-Extension-Typst/   # this repo
 ```
 
+Only the `RustCFML/` sibling's name matters — the dependency is
+`../RustCFML/crates/rustcfml-module` — so this directory can be called anything.
 CI does the same with two sibling checkouts, and pins the engine ref because that
 tree is a real build input. When the wrapper is published, this becomes an
 ordinary version requirement and the checkout goes away.
