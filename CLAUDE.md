@@ -141,7 +141,7 @@ compiles perfectly well.
 
 ## Licensing
 
-Dual MIT/Apache-2.0 for this crate's own code; see LICENSE. A `.rcx` statically
+Dual MIT/Apache-2.0 for this crate's own code; see COPYRIGHT. A `.rcx` statically
 links Typst and ~90 crates, so notices must travel with it: `THIRD-PARTY.txt` is
 generated (`./scripts/gen-licenses.sh`, needs cargo-about 0.9.1), committed, and
 packaged inside the archive along with NOTICE and the licence files. Regenerate

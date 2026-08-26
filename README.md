@@ -251,8 +251,8 @@ offers.
 ## Licence
 
 This extension's own code is dual-licensed **MIT OR Apache-2.0** — see
-[LICENSE](LICENSE), [LICENSE-MIT](LICENSE-MIT) and
-[LICENSE-APACHE](LICENSE-APACHE).
+[LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE) and
+[COPYRIGHT](COPYRIGHT).
 
 It is a thin layer over other people's work. **Typst** (© The Typst Project
 Developers, Apache-2.0) does the typesetting; **RustCFML** (© the RustCFML Team,
