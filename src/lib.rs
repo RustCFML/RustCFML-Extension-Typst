@@ -71,7 +71,7 @@ fn typst_font_count<'a>(ctx: &'a Ctx, _args: &[Value<'a>]) -> Result<Value<'a>> 
 /// Once per process, before any request. Enumerating the host's fonts took
 /// ~2.1 s for 904 faces on the development machine; doing it here means no
 /// request ever pays for it, which is exactly what `on_load` is for.
-fn warm_fonts() -> Result<()> {
+fn warm_fonts(_ctx: &Ctx, _settings: Value) -> Result<()> {
     let _ = world::font_count();
     Ok(())
 }
