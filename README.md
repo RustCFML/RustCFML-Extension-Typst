@@ -2,8 +2,8 @@
 
 Document generation for [RustCFML](https://github.com/RustCFML/RustCFML), backed by
 [Typst](https://github.com/typst/typst) — a fluent `Document()` builder and
-`<cfdocument>` compatibility, delivered as a **native module** rather than as
-part of the engine.
+`<cfdocument>` compatibility, delivered as a **`.rcx` extension** you install
+into a stock engine rather than as part of the engine.
 
 > **Status: the fluent `Document()` builder works.** Page setup, headings,
 > paragraphs, lists, tables from a query, images, headers/footers, page breaks
@@ -14,7 +14,8 @@ part of the engine.
 
 ## Why a module rather than part of the engine
 
-Typst is ~93 crates and **+31.6 MB** on the RustCFML binary (measured: 56.0 → 87.6 MB).
+Typst is ~93 crates and **+31.6 MB** of binary (measured: 56.0 → 87.6 MB when it
+was linked in).
 PDF *reading* belongs in the engine and is there already — `PdfRead`, `PdfToImage`
 and friends, which cost +4.3 MB. Document *authoring* is a much larger dependency
 for a capability not every application wants, so it ships separately and you opt
@@ -58,23 +59,27 @@ rule, which applies to these methods like any other: you may not mix the two
 forms in one call. `.spacer( 1, unit="cm" )` is an error; write
 `.spacer( amount=1, unit="cm" )`.
 
-## Building it
+## Installing it
 
-Native modules are linked into a bespoke binary by `rustcfml --build`. Put a thin
-crate under your app's `native/` that depends on this one and re-exports its
-`register` (see [`examples/invoice`](examples/invoice)), then:
+This is a **`.rcx` extension**: precompiled Rust that a *stock* `rustcfml`
+binary loads at start-up. No engine rebuild, no toolchain on the server.
 
 ```sh
-cd your-app
-rustcfml --build .
-./app --port 8080
+rustcfml ext build .                      # produces typst-0.1.0.rcx
+rustcfml ext install typst-0.1.0.rcx --user
 ```
 
-Requires **RustCFML ≥ v0.634.1** — earlier versions cannot complete a cocktail
-build at all.
+…or drop the `.rcx` into your application's `extensions/` directory and check it
+into the project. `rustcfml ext list` shows what is installed and whether it
+loads. See [RustCFML's extension guide](https://github.com/RustCFML/RustCFML/blob/main/docs/extensions.md).
 
-`--build` **snapshots your `.cfm` files into the binary**. Re-run it after editing
-them, or you will be served the copy from the last build.
+Requires **RustCFML ≥ v0.635.0** (the extension ABI, and named arguments on a
+native class's methods).
+
+Because the extension boundary is a C ABI over opaque handles, this crate links
+neither the engine nor its allocator, and does not care which rustc built the
+engine you install it into. Building it needs only `rustcfml-module` — no engine
+checkout.
 
 ### ⚠️ Typst markup and CFML's `#` (only if you write markup by hand)
 

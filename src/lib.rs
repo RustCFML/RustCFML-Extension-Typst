@@ -1,77 +1,91 @@
-//! Typst-backed document generation for RustCFML.
+//! Typst-backed document generation for RustCFML, as a dynamically loaded
+//! extension (`.rcx`).
 //!
 //! Two surfaces, mirroring how the engine ships spreadsheets:
 //!
 //! * a **fluent `Document()` builder**, BoxLang-flavoured — mutators return the
 //!   document so calls chain, terminals (`toBinary`, `write`) end the chain;
-//! * **`<cfdocument>` compatibility**, which takes HTML and needs an HTML→Typst
-//!   translation layer.
-//!
-//! Only the first slice is implemented so far — see `docs/PLAN.md` for the
-//! full design and the phase order. What exists today proves the whole chain:
-//! Typst embeds, compiles, and returns a PDF from inside a native module.
+//! * a **raw Typst surface** (`typstCompile`, `typstPageCount`) for callers who
+//!   want to hand-write markup.
 //!
 //! ```cfml
-//! bin = TypstCompile( "= Hello#linebreak()World" );   // PDF bytes
+//! Document().heading( text = "Invoice", level = 1 )
+//!           .table( data = lines, header = true )
+//!           .write( expandPath( "/invoice.pdf" ) );
 //! ```
+//!
+//! # Why this is an extension and not part of the engine
+//!
+//! Typst is ~93 crates and **+31.6 MB** of binary. PDF *reading* belongs in the
+//! engine and is there already; document *authoring* is a much larger
+//! dependency for a capability not every application wants. Shipping it as a
+//! `.rcx` means you opt in by installing a file — and, because the extension
+//! ABI is a C ABI over opaque handles, this crate links neither the engine nor
+//! its allocator and does not care which rustc built the engine.
 
 mod document;
 mod emit;
 mod model;
 mod world;
 
-use rustcfml_cli::{CfmlError, CfmlResult, Value, Vm};
+use rustcfml_module::{module, Ctx, Error, Result, Value};
 
-/// Entry point for the **cocktail** (statically linked) delivery path, which is
-/// what `rustcfml --build` looks for and what works today.
-///
-/// The `.rcx` dynamic path will add a separate `extern "C"` entry point beside
-/// this one, over the same functions — see `docs/PLAN.md` §"Two delivery modes".
-pub fn register(vm: &mut Vm) {
-    // The fluent builder — the surface application code should reach for.
-    vm.register_native_fn("Document", document::fn_document);
-    vm.register_native_fn("isDocumentObject", document::fn_is_document_object);
+use document::CfmlDocument;
 
-    // The raw Typst surface, for callers who want to hand-write markup.
-    vm.register_native_fn("typstCompile", typst_compile);
-    vm.register_native_fn("typstPageCount", typst_page_count);
-    vm.register_native_fn("typstFontCount", typst_font_count);
-}
-
-fn markup_arg(args: &[Value], fname: &str) -> Result<String, CfmlError> {
+fn markup_arg<'a>(args: &[Value<'a>], fname: &str) -> Result<String> {
     match args.first() {
-        Some(v) => {
-            let s = v.as_string();
+        Some(v) if !v.is_null() => {
+            let s = v.to_string();
             if s.trim().is_empty() {
-                Err(CfmlError::runtime(format!("{}: markup is required", fname)))
+                Err(Error::expression(format!("{}: markup is required", fname)))
             } else {
                 Ok(s)
             }
         }
-        None => Err(CfmlError::runtime(format!("{}: markup is required", fname))),
+        _ => Err(Error::expression(format!("{}: markup is required", fname))),
     }
 }
 
 /// `TypstCompile( markup )` → the PDF as a Binary.
-fn typst_compile(args: Vec<Value>) -> CfmlResult {
-    let markup = markup_arg(&args, "TypstCompile")?;
-    world::compile_pdf(&markup)
-        .map(Value::Binary)
-        .map_err(CfmlError::runtime)
+fn typst_compile<'a>(ctx: &'a Ctx, args: &[Value<'a>]) -> Result<Value<'a>> {
+    let markup = markup_arg(args, "TypstCompile")?;
+    let pdf = world::compile_pdf(&markup).map_err(Error::new)?;
+    Ok(ctx.binary(&pdf))
 }
 
 /// `TypstPageCount( markup )` → how many pages it lays out to.
-fn typst_page_count(args: Vec<Value>) -> CfmlResult {
-    let markup = markup_arg(&args, "TypstPageCount")?;
-    world::page_count(&markup)
-        .map(|n| Value::Int(n as i64))
-        .map_err(CfmlError::runtime)
+fn typst_page_count<'a>(ctx: &'a Ctx, args: &[Value<'a>]) -> Result<Value<'a>> {
+    let markup = markup_arg(args, "TypstPageCount")?;
+    let n = world::page_count(&markup).map_err(Error::new)?;
+    Ok(ctx.int(n as i64))
 }
 
 /// `TypstFontCount()` → font faces visible to the engine.
 ///
-/// A diagnostic worth having: "no fonts installed on this host" and "your markup
-/// is wrong" produce very similar-looking failures otherwise.
-fn typst_font_count(_args: Vec<Value>) -> CfmlResult {
-    Ok(Value::Int(world::font_count() as i64))
+/// A diagnostic worth having: "no fonts installed on this host" and "your
+/// markup is wrong" produce very similar-looking failures otherwise.
+fn typst_font_count<'a>(ctx: &'a Ctx, _args: &[Value<'a>]) -> Result<Value<'a>> {
+    Ok(ctx.int(world::font_count() as i64))
+}
+
+/// Once per process, before any request. Enumerating the host's fonts took
+/// ~2.1 s for 904 faces on the development machine; doing it here means no
+/// request ever pays for it, which is exactly what `on_load` is for.
+fn warm_fonts() -> Result<()> {
+    let _ = world::font_count();
+    Ok(())
+}
+
+module! {
+    name: "typst",
+    version: "0.1.0",
+    bifs: {
+        "Document"         => document::fn_document,
+        "isDocumentObject" => document::fn_is_document_object,
+        "typstCompile"     => typst_compile,
+        "typstPageCount"   => typst_page_count,
+        "typstFontCount"   => typst_font_count,
+    },
+    classes: { CfmlDocument },
+    on_load: warm_fonts,
 }

@@ -1,7 +1,6 @@
 /target
 **/*.rs.bk
 .DS_Store
-/examples/**/.rustcfml-cocktail/
-# `rustcfml --build` output: a full bespoke engine binary (~100 MB).
-/examples/*/app
-/examples/*/app.exe
+# `rustcfml ext build` output — a packaged extension carrying the built library.
+*.rcx
+/examples/*/extensions/

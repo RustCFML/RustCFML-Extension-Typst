@@ -19,8 +19,10 @@ Document()
     .write( expandPath( "/invoice.pdf" ) );
 ```
 
-Requires **RustCFML ≥ v0.635.0** for named arguments on a native class's
-methods. On older engines every call above must be positional.
+Requires **RustCFML ≥ v0.635.0**: the `.rcx` extension ABI, and named arguments
+on a native class's methods. Note CFML's own rule — you may not mix positional
+and named arguments in one call, so `.spacer( 1, unit="cm" )` is an error and
+`.spacer( amount=1, unit="cm" )` is not.
 
 ## Page setup
 

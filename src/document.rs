@@ -1,106 +1,98 @@
-//! `Document()` — the fluent builder, and the CFML-facing method table.
+//! `Document()` — the fluent builder, as a `.rcx` native class.
 //!
-//! Shaped after the engine's `Spreadsheet()` (see `docs/spreadsheets.md`):
-//! a shared, reference-typed native object whose mutators return the object
-//! itself so calls chain, and whose terminals (`write`, `toBinary`, `toTypst`,
-//! `pageCount`) end the chain and return a value.
+//! Shaped after the engine's `Spreadsheet()`: mutators return the document so
+//! calls chain, terminals (`write`, `toBinary`, `toTypst`, `pageCount`) end the
+//! chain and return a value.
+//!
+//! Note `&self` on every method — the extension ABI's contract. The document
+//! model therefore lives behind a `Mutex`, which is also what makes this class
+//! safe to hand to concurrent requests: a `Document` is a shared, reference-
+//! typed CFML value exactly like a `Spreadsheet`.
 
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::Mutex;
 
-use rustcfml_cli::{CfmlError, CfmlNative, CfmlResult, Value};
+use rustcfml_module::{Ctx, Error, NativeClass, Result, Value};
 
 use crate::model::{Align, Block, Document, Length, Margin, Running, TableData, TextStyle, Unit};
 use crate::{emit, world};
 
 pub struct CfmlDocument {
+    inner: Mutex<Inner>,
+}
+
+struct Inner {
     doc: Document,
-    /// Set at construction via `Arc::new_cyclic` so a mutator can hand back the
-    /// *same* handle rather than a copy of a growing document.
-    self_ref: Option<Weak<RwLock<CfmlDocument>>>,
     /// Counter behind the virtual filenames given to embedded images.
     next_file: usize,
 }
 
-impl std::fmt::Debug for CfmlDocument {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Document")
-            .field("blocks", &self.doc.blocks.len())
-            .field("paper", &self.doc.page.paper)
-            .finish()
-    }
-}
-
 impl CfmlDocument {
     pub fn new() -> CfmlDocument {
-        CfmlDocument { doc: Document::default(), self_ref: None, next_file: 0 }
-    }
-
-    pub fn into_value(mut self) -> Value {
-        let arc: Arc<RwLock<CfmlDocument>> = Arc::new_cyclic(|weak| {
-            self.self_ref = Some(weak.clone());
-            RwLock::new(self)
-        });
-        Value::NativeObject(arc)
-    }
-
-    fn this(&self) -> Value {
-        match self.self_ref.as_ref().and_then(|w| w.upgrade()) {
-            Some(arc) => Value::NativeObject(arc),
-            None => Value::Null,
+        CfmlDocument {
+            inner: Mutex::new(Inner { doc: Document::default(), next_file: 0 }),
         }
     }
 
-    /// The generated Typst markup. The debugging seam: when a document comes
-    /// out wrong you need to see what was actually compiled.
-    pub fn to_typst(&self) -> String {
-        emit::emit(&self.doc)
+    fn with<R>(&self, f: impl FnOnce(&mut Inner) -> R) -> R {
+        // A poisoned lock means a previous call panicked mid-mutation. The
+        // document may be half-built, but refusing every later call would turn
+        // one bad `.paragraph()` into a dead object; the model is plain data,
+        // so recovering is honest here.
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        f(&mut g)
     }
 
-    fn to_pdf(&self) -> Result<Vec<u8>, CfmlError> {
-        world::compile_pdf_with_files(&self.to_typst(), &self.doc.files).map_err(CfmlError::runtime)
+    pub fn to_typst(&self) -> String {
+        self.with(|i| emit::emit(&i.doc))
+    }
+
+    fn to_pdf(&self) -> Result<Vec<u8>> {
+        let (markup, files) = self.with(|i| (emit::emit(&i.doc), i.doc.files.clone()));
+        world::compile_pdf_with_files(&markup, &files).map_err(Error::new)
     }
 }
 
 // ---------------------------------------------------------------------------
 // Argument helpers
+//
+// Every one of these treats "absent" and "null" identically, so a caller can
+// name only the arguments they care about and leave the rest to the defaults.
 // ---------------------------------------------------------------------------
 
-fn present(v: Option<&Value>) -> Option<&Value> {
-    match v {
-        Some(Value::Null) | None => None,
-        Some(v) => Some(v),
-    }
+fn present<'a>(args: &[Value<'a>], i: usize) -> Option<Value<'a>> {
+    args.get(i).copied().filter(|v| !v.is_null())
 }
 
-fn str_arg(a: &[Value], i: usize) -> Option<String> {
-    present(a.get(i)).map(|v| v.as_string())
+fn str_arg(args: &[Value], i: usize) -> Option<String> {
+    present(args, i).map(|v| v.to_string())
 }
 
-fn bool_arg(a: &[Value], i: usize) -> Option<bool> {
-    present(a.get(i)).map(|v| v.is_true())
+fn text_arg(args: &[Value], i: usize) -> Option<String> {
+    str_arg(args, i).filter(|s| !s.trim().is_empty())
 }
 
-fn num_arg(a: &[Value], i: usize, what: &str) -> Result<Option<f64>, CfmlError> {
-    match present(a.get(i)) {
+fn bool_arg(args: &[Value], i: usize) -> Option<bool> {
+    present(args, i).map(|v| v.is_true())
+}
+
+fn num_arg(args: &[Value], i: usize, what: &str) -> Result<Option<f64>> {
+    match present(args, i) {
         None => Ok(None),
-        Some(v) => {
-            let s = v.as_string();
-            match s.trim().parse::<f64>() {
-                Ok(n) if n.is_finite() => Ok(Some(n)),
-                _ => Err(CfmlError::runtime(format!(
-                    "Document: {} must be a number, got [{}]",
-                    what, s
-                ))),
-            }
-        }
+        Some(v) => match v.as_f64() {
+            Ok(n) if n.is_finite() => Ok(Some(n)),
+            _ => Err(Error::expression(format!(
+                "Document: {} must be a number, got [{}]",
+                what, v
+            ))),
+        },
     }
 }
 
-fn unit_arg(a: &[Value], i: usize) -> Result<Unit, CfmlError> {
-    match str_arg(a, i) {
+fn unit_arg(args: &[Value], i: usize) -> Result<Unit> {
+    match text_arg(args, i) {
         None => Ok(Unit::Pt),
         Some(s) => Unit::parse(&s).ok_or_else(|| {
-            CfmlError::runtime(format!(
+            Error::expression(format!(
                 "Document: unknown unit [{}] — use pt, mm, cm, in, em, % or fr",
                 s
             ))
@@ -108,15 +100,15 @@ fn unit_arg(a: &[Value], i: usize) -> Result<Unit, CfmlError> {
     }
 }
 
-fn len_arg(a: &[Value], i: usize, unit: Unit, what: &str) -> Result<Option<Length>, CfmlError> {
-    Ok(num_arg(a, i, what)?.map(|value| Length { value, unit }))
+fn len_arg(args: &[Value], i: usize, unit: Unit, what: &str) -> Result<Option<Length>> {
+    Ok(num_arg(args, i, what)?.map(|value| Length { value, unit }))
 }
 
-fn align_arg(a: &[Value], i: usize) -> Result<Option<Align>, CfmlError> {
-    match str_arg(a, i).filter(|s| !s.trim().is_empty()) {
+fn align_arg(args: &[Value], i: usize) -> Result<Option<Align>> {
+    match text_arg(args, i) {
         None => Ok(None),
         Some(s) => Align::parse(&s).map(Some).ok_or_else(|| {
-            CfmlError::runtime(format!(
+            Error::expression(format!(
                 "Document: unknown alignment [{}] — use left, center, right or justify",
                 s
             ))
@@ -124,13 +116,13 @@ fn align_arg(a: &[Value], i: usize) -> Result<Option<Align>, CfmlError> {
     }
 }
 
-/// A CFML colour (`"red"`, `"#c00"`, `"##ff9900"`) as a Typst colour
-/// expression. Rejecting anything else is what keeps caller text out of the
-/// generated code — a colour is the one place a raw expression is emitted.
-fn color_arg(a: &[Value], i: usize) -> Result<Option<String>, CfmlError> {
-    let Some(raw) = str_arg(a, i).filter(|s| !s.trim().is_empty()) else {
-        return Ok(None);
-    };
+/// A CFML colour as a Typst colour expression.
+///
+/// Rejecting anything else is what keeps caller text out of the generated code:
+/// a colour is the one place the builder emits a bare expression rather than a
+/// string literal, so it is the one place that has to be checked.
+fn color_arg(args: &[Value], i: usize) -> Result<Option<String>> {
+    let Some(raw) = text_arg(args, i) else { return Ok(None) };
     let s = raw.trim();
     let hex = s.trim_start_matches('#');
     if !hex.is_empty()
@@ -139,7 +131,6 @@ fn color_arg(a: &[Value], i: usize) -> Result<Option<String>, CfmlError> {
     {
         return Ok(Some(format!("rgb(\"#{}\")", hex)));
     }
-    // Typst's own named colours, plus the CSS names that mean the same thing.
     const NAMED: &[&str] = &[
         "black", "gray", "grey", "silver", "white", "navy", "blue", "aqua", "teal", "eastern",
         "purple", "fuchsia", "maroon", "red", "orange", "yellow", "olive", "green", "lime",
@@ -149,69 +140,84 @@ fn color_arg(a: &[Value], i: usize) -> Result<Option<String>, CfmlError> {
         let name = if lower == "grey" { "gray".to_string() } else { lower };
         return Ok(Some(name));
     }
-    Err(CfmlError::runtime(format!(
+    Err(Error::expression(format!(
         "Document: unknown colour [{}] — use a hex value (##RGB/##RRGGBB) or one of: {}",
         raw,
         NAMED.join(", ")
     )))
 }
 
-/// Pull the shared inline-style arguments off a call.
+/// The shared inline-style arguments, wherever they sit in a signature.
 fn style_from(
-    a: &[Value],
+    args: &[Value],
     align_i: usize,
     bold_i: usize,
     italic_i: usize,
     size_i: usize,
     color_i: usize,
     font_i: usize,
-) -> Result<TextStyle, CfmlError> {
+) -> Result<TextStyle> {
     Ok(TextStyle {
-        bold: bool_arg(a, bold_i).unwrap_or(false),
-        italic: bool_arg(a, italic_i).unwrap_or(false),
-        size: len_arg(a, size_i, Unit::Pt, "size")?,
-        font: str_arg(a, font_i).filter(|s| !s.trim().is_empty()),
-        color: color_arg(a, color_i)?,
-        align: align_arg(a, align_i)?,
+        bold: bool_arg(args, bold_i).unwrap_or(false),
+        italic: bool_arg(args, italic_i).unwrap_or(false),
+        size: len_arg(args, size_i, Unit::Pt, "size")?,
+        font: text_arg(args, font_i),
+        color: color_arg(args, color_i)?,
+        align: align_arg(args, align_i)?,
     })
 }
 
-/// Flatten a CFML value into the rows of a table.
+/// A list argument: a CFML array, or a comma-delimited string.
+fn string_items(v: Option<Value>) -> Result<Vec<String>> {
+    let Some(v) = v else { return Ok(Vec::new()) };
+    if v.kind() == rustcfml_module::abi::ty::ARRAY {
+        let n = v.len()?;
+        return Ok((0..n).map(|i| v.get(i).to_string()).collect());
+    }
+    Ok(v.to_string()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect())
+}
+
+/// Flatten a CFML value into table rows.
 ///
-/// Accepts a query, an array of arrays, an array of structs (keys of the first
-/// struct set the column order) or a single array of scalars.
-fn table_rows(v: Option<&Value>, header: bool) -> Result<TableData, CfmlError> {
+/// Accepts a query, an array of arrays, an array of structs (the first struct's
+/// keys set the column order) or an array of scalars.
+fn table_rows(v: Option<Value>, header: bool) -> Result<TableData> {
+    use rustcfml_module::abi::ty;
+
     let mut rows: Vec<Vec<String>> = Vec::new();
-    match present(v) {
+    match v {
         None => {}
-        Some(Value::Query(q)) => {
-            let columns = q.columns();
+        Some(v) if v.kind() == ty::QUERY => {
+            let columns = v.query_columns()?;
             if header {
-                rows.push(columns.clone());
+                rows.push(columns.iter().map(|c| c.to_string()).collect());
             }
-            for r in 0..q.row_count() {
-                let row = q.get_row(r);
-                let cells = columns
-                    .iter()
-                    .map(|c| {
-                        row.as_ref()
-                            .and_then(|m| {
-                                m.iter()
-                                    .find(|(k, _)| k.eq_ignore_ascii_case(c))
-                                    .map(|(_, val)| val.as_string())
-                            })
-                            .unwrap_or_default()
-                    })
-                    .collect();
-                rows.push(cells);
+            // One crossing per COLUMN, not per cell: `query_column` materialises
+            // the whole column in a single call, which is the difference
+            // between 3 crossings and 30,000 on a 10k-row report.
+            let mut cols: Vec<Vec<String>> = Vec::with_capacity(columns.len());
+            for i in 0..columns.len() {
+                let col = v.query_column(i);
+                let n = col.len()?;
+                cols.push((0..n).map(|r| col.get(r).to_string()).collect());
+            }
+            let row_count = v.query_row_count()?;
+            for r in 0..row_count {
+                rows.push(
+                    cols.iter().map(|c| c.get(r).cloned().unwrap_or_default()).collect(),
+                );
             }
         }
-        Some(Value::Array(arr)) => {
-            let items = arr.snapshot();
-            // An array of structs takes its column order from the first row.
-            let struct_keys: Option<Vec<String>> = match items.first() {
-                Some(Value::Struct(s)) => {
-                    Some(s.snapshot().into_iter().map(|(k, _)| k.to_string()).collect())
+        Some(v) if v.kind() == ty::ARRAY => {
+            let n = v.len()?;
+            let first = if n > 0 { Some(v.get(0)) } else { None };
+            let struct_keys: Option<Vec<String>> = match first {
+                Some(f) if f.kind() == ty::STRUCT => {
+                    Some(f.keys()?.iter().map(|k| k.to_string()).collect())
                 }
                 _ => None,
             };
@@ -219,35 +225,35 @@ fn table_rows(v: Option<&Value>, header: bool) -> Result<TableData, CfmlError> {
                 if header {
                     rows.push(keys.clone());
                 }
-                for item in &items {
-                    if let Value::Struct(s) = item {
-                        rows.push(
-                            keys.iter()
-                                .map(|k| s.get_ci(k).map(|v| v.as_string()).unwrap_or_default())
-                                .collect(),
-                        );
+                for i in 0..n {
+                    let item = v.get(i);
+                    if item.kind() != ty::STRUCT {
+                        continue;
                     }
+                    rows.push(keys.iter().map(|k| item.key(k).to_string()).collect());
                 }
             } else {
-                for item in &items {
-                    match item {
-                        Value::Array(inner) => {
-                            rows.push(inner.snapshot().iter().map(|c| c.as_string()).collect())
-                        }
-                        other => rows.push(vec![other.as_string()]),
+                for i in 0..n {
+                    let item = v.get(i);
+                    if item.kind() == ty::ARRAY {
+                        let inner = item.len()?;
+                        rows.push((0..inner).map(|j| item.get(j).to_string()).collect());
+                    } else {
+                        rows.push(vec![item.to_string()]);
                     }
                 }
             }
         }
-        Some(other) => {
-            return Err(CfmlError::runtime(format!(
-                "Document.table() takes a query, an array of arrays or an array of structs, got {}",
-                other.type_name()
-            )))
+        Some(_) => {
+            return Err(Error::expression(
+                "Document.table() takes a query, an array of arrays or an array of structs"
+                    .to_string(),
+            ))
         }
     }
+
     // Ragged input would produce a Typst table with a short final row, which
-    // fails to lay out with a confusing message. Pad here instead.
+    // fails to lay out with a message that says nothing useful. Pad here.
     let width = rows.iter().map(|r| r.len()).max().unwrap_or(0);
     for row in rows.iter_mut() {
         while row.len() < width {
@@ -257,201 +263,214 @@ fn table_rows(v: Option<&Value>, header: bool) -> Result<TableData, CfmlError> {
     Ok(TableData { rows })
 }
 
-fn string_items(v: Option<&Value>) -> Vec<String> {
-    match present(v) {
-        Some(Value::Array(arr)) => arr.snapshot().iter().map(|x| x.as_string()).collect(),
-        Some(other) => other
-            .as_string()
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect(),
-        None => Vec::new(),
+/// Sniff an image's type from its bytes, not its filename — the same rule the
+/// engine's `imageRead` follows, and what Typst keys its decoder on.
+fn image_extension(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        Some("png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("jpg")
+    } else if bytes.starts_with(b"GIF8") {
+        Some("gif")
+    } else if bytes.len() > 4
+        && std::str::from_utf8(&bytes[..bytes.len().min(512)])
+            .map(|s| s.contains("<svg"))
+            .unwrap_or(false)
+    {
+        Some("svg")
+    } else {
+        None
     }
 }
 
 // ---------------------------------------------------------------------------
-// The CFML method table
+// The CFML class
 // ---------------------------------------------------------------------------
 
-impl CfmlNative for CfmlDocument {
-    fn class_name(&self) -> &str {
-        "Document"
+impl NativeClass for CfmlDocument {
+    const CLASS_NAME: &'static str = "Document";
+
+    fn new(_ctx: &Ctx, _args: &[Value]) -> Result<Self> {
+        Ok(CfmlDocument::new())
     }
 
-    /// Declared so a named call binds by name. Without this the engine refuses
-    /// named arguments outright — see `CfmlNative::method_params`.
-    fn method_params(&self, method: &str) -> Option<&'static [&'static str]> {
+    /// Declared so a named call binds by name. A method the host cannot see
+    /// parameter names for has named arguments **refused** rather than bound by
+    /// position, which would be a silent wrong answer.
+    fn method_params(method: &str) -> Option<&'static str> {
         Some(match method.to_ascii_lowercase().as_str() {
-            "pagesize" | "paper" => &["paper", "width", "height", "unit"][..],
-            "orientation" => &["orientation"][..],
-            "margin" | "margins" => &["all", "top", "bottom", "left", "right", "unit"][..],
-            "font" => &["family", "size", "color"][..],
-            "numbering" => &["pattern"][..],
-            "title" => &["title"][..],
-            "author" => &["author"][..],
-            "header" | "footer" => &["content", "align"][..],
-            "heading" => {
-                &["text", "level", "align", "bold", "italic", "size", "color", "font"][..]
-            }
-            "paragraph" | "text" | "p" => {
-                &["text", "align", "bold", "italic", "size", "color", "font"][..]
-            }
-            "list" => &["items", "ordered", "align", "size", "color", "font"][..],
-            "table" => &["data", "header", "columns", "align", "unit", "size", "font"][..],
-            "image" => &["source", "width", "height", "align", "unit"][..],
-            "spacer" | "space" => &["amount", "unit"][..],
-            "typst" => &["markup"][..],
-            "save" | "write" => &["path", "overwrite"][..],
-            "pagebreak" | "rule" | "hr" | "totypst" | "tobinary" | "topdf" | "pagecount" => {
-                &[][..]
-            }
+            "pagesize" | "paper" => "paper,width,height,unit",
+            "orientation" => "orientation",
+            "margin" | "margins" => "all,top,bottom,left,right,unit",
+            "font" => "family,size,color",
+            "numbering" => "pattern",
+            "title" => "title",
+            "author" => "author",
+            "header" | "footer" => "content,align",
+            "heading" => "text,level,align,bold,italic,size,color,font",
+            "paragraph" | "text" | "p" => "text,align,bold,italic,size,color,font",
+            "list" => "items,ordered,align,size,color,font",
+            "table" => "data,header,columns,align,unit,size,font",
+            "image" => "source,width,height,align,unit",
+            "spacer" | "space" => "amount,unit",
+            "typst" => "markup",
+            "write" | "save" => "path,overwrite",
+            "pagebreak" | "rule" | "hr" | "totypst" | "tobinary" | "topdf" | "pagecount" => "",
             _ => return None,
         })
     }
 
-    fn call_method(&mut self, name: &str, args: Vec<Value>) -> CfmlResult {
-        let a = args.as_slice();
-        match name.to_ascii_lowercase().as_str() {
+    fn call<'a>(&self, ctx: &'a Ctx, method: &str, args: &[Value<'a>]) -> Result<Value<'a>> {
+        match method.to_ascii_lowercase().as_str() {
             // ---- page setup (mutators, return this) ------------------------
             "pagesize" | "paper" => {
-                if let Some(p) = str_arg(a, 0).filter(|s| !s.trim().is_empty()) {
-                    self.doc.page.paper = p.trim().to_ascii_lowercase();
-                    self.doc.page.width = None;
-                    self.doc.page.height = None;
-                }
-                let unit = unit_arg(a, 3)?;
-                if let Some(w) = len_arg(a, 1, unit, "width")? {
-                    self.doc.page.width = Some(w);
-                }
-                if let Some(h) = len_arg(a, 2, unit, "height")? {
-                    self.doc.page.height = Some(h);
-                }
-                Ok(self.this())
+                let unit = unit_arg(args, 3)?;
+                let paper = text_arg(args, 0);
+                let width = len_arg(args, 1, unit, "width")?;
+                let height = len_arg(args, 2, unit, "height")?;
+                self.with(|i| {
+                    if let Some(p) = paper {
+                        i.doc.page.paper = p.trim().to_ascii_lowercase();
+                        i.doc.page.width = None;
+                        i.doc.page.height = None;
+                    }
+                    if let Some(w) = width {
+                        i.doc.page.width = Some(w);
+                    }
+                    if let Some(h) = height {
+                        i.doc.page.height = Some(h);
+                    }
+                });
+                Ok(ctx.this())
             }
             "orientation" => {
-                let o = str_arg(a, 0).unwrap_or_default();
-                self.doc.page.landscape = match o.trim().to_ascii_lowercase().as_str() {
+                let o = str_arg(args, 0).unwrap_or_default();
+                let landscape = match o.trim().to_ascii_lowercase().as_str() {
                     "landscape" => true,
                     "portrait" => false,
                     other => {
-                        return Err(CfmlError::runtime(format!(
+                        return Err(Error::expression(format!(
                             "Document.orientation() takes \"portrait\" or \"landscape\", got [{}]",
                             other
                         )))
                     }
                 };
-                Ok(self.this())
+                self.with(|i| i.doc.page.landscape = landscape);
+                Ok(ctx.this())
             }
             "margin" | "margins" => {
-                let unit = unit_arg(a, 5)?;
-                let all = len_arg(a, 0, unit, "margin")?;
-                let mut m = Margin {
-                    top: all,
-                    bottom: all,
-                    left: all,
-                    right: all,
-                };
-                if let Some(v) = len_arg(a, 1, unit, "top")? {
+                let unit = unit_arg(args, 5)?;
+                let all = len_arg(args, 0, unit, "margin")?;
+                let mut m = Margin { top: all, bottom: all, left: all, right: all };
+                if let Some(v) = len_arg(args, 1, unit, "top")? {
                     m.top = Some(v);
                 }
-                if let Some(v) = len_arg(a, 2, unit, "bottom")? {
+                if let Some(v) = len_arg(args, 2, unit, "bottom")? {
                     m.bottom = Some(v);
                 }
-                if let Some(v) = len_arg(a, 3, unit, "left")? {
+                if let Some(v) = len_arg(args, 3, unit, "left")? {
                     m.left = Some(v);
                 }
-                if let Some(v) = len_arg(a, 4, unit, "right")? {
+                if let Some(v) = len_arg(args, 4, unit, "right")? {
                     m.right = Some(v);
                 }
-                self.doc.page.margin = m;
-                Ok(self.this())
+                self.with(|i| i.doc.page.margin = m);
+                Ok(ctx.this())
             }
             "font" => {
-                if let Some(f) = str_arg(a, 0).filter(|s| !s.trim().is_empty()) {
-                    self.doc.font_family = Some(f);
-                }
-                if let Some(s) = len_arg(a, 1, Unit::Pt, "size")? {
-                    self.doc.font_size = Some(s);
-                }
-                if let Some(c) = color_arg(a, 2)? {
-                    self.doc.text_color = Some(c);
-                }
-                Ok(self.this())
+                let family = text_arg(args, 0);
+                let size = len_arg(args, 1, Unit::Pt, "size")?;
+                let color = color_arg(args, 2)?;
+                self.with(|i| {
+                    if family.is_some() {
+                        i.doc.font_family = family;
+                    }
+                    if size.is_some() {
+                        i.doc.font_size = size;
+                    }
+                    if color.is_some() {
+                        i.doc.text_color = color;
+                    }
+                });
+                Ok(ctx.this())
             }
             "numbering" => {
-                self.doc.page.numbering = str_arg(a, 0).filter(|s| !s.is_empty());
-                Ok(self.this())
+                let p = text_arg(args, 0);
+                self.with(|i| i.doc.page.numbering = p);
+                Ok(ctx.this())
             }
             "title" => {
-                self.doc.title = str_arg(a, 0);
-                Ok(self.this())
+                let t = str_arg(args, 0);
+                self.with(|i| i.doc.title = t);
+                Ok(ctx.this())
             }
             "author" => {
-                self.doc.author = str_arg(a, 0);
-                Ok(self.this())
+                let a = str_arg(args, 0);
+                self.with(|i| i.doc.author = a);
+                Ok(ctx.this())
             }
             "header" | "footer" => {
-                let running = Running {
-                    text: str_arg(a, 0).unwrap_or_default(),
-                    align: align_arg(a, 1)?,
-                };
-                if name.eq_ignore_ascii_case("header") {
-                    self.doc.header = Some(running);
-                } else {
-                    self.doc.footer = Some(running);
-                }
-                Ok(self.this())
+                let running =
+                    Running { text: str_arg(args, 0).unwrap_or_default(), align: align_arg(args, 1)? };
+                let is_header = method.eq_ignore_ascii_case("header");
+                self.with(|i| {
+                    if is_header {
+                        i.doc.header = Some(running);
+                    } else {
+                        i.doc.footer = Some(running);
+                    }
+                });
+                Ok(ctx.this())
             }
 
             // ---- content ---------------------------------------------------
             "heading" => {
-                let text = str_arg(a, 0).unwrap_or_default();
-                let level = num_arg(a, 1, "level")?.unwrap_or(1.0);
+                let text = str_arg(args, 0).unwrap_or_default();
+                let level = num_arg(args, 1, "level")?.unwrap_or(1.0);
                 if !(1.0..=6.0).contains(&level) {
-                    return Err(CfmlError::runtime(format!(
+                    return Err(Error::expression(format!(
                         "Document.heading(): level must be 1-6, got {}",
                         level
                     )));
                 }
-                let style = style_from(a, 2, 3, 4, 5, 6, 7)?;
-                self.doc.blocks.push(Block::Heading { level: level as u8, text, style });
-                Ok(self.this())
+                let style = style_from(args, 2, 3, 4, 5, 6, 7)?;
+                self.with(|i| {
+                    i.doc.blocks.push(Block::Heading { level: level as u8, text, style })
+                });
+                Ok(ctx.this())
             }
             "paragraph" | "text" | "p" => {
-                let text = str_arg(a, 0).unwrap_or_default();
-                let style = style_from(a, 1, 2, 3, 4, 5, 6)?;
-                self.doc.blocks.push(Block::Paragraph { text, style });
-                Ok(self.this())
+                let text = str_arg(args, 0).unwrap_or_default();
+                let style = style_from(args, 1, 2, 3, 4, 5, 6)?;
+                self.with(|i| i.doc.blocks.push(Block::Paragraph { text, style }));
+                Ok(ctx.this())
             }
             "list" => {
-                let items = string_items(a.first());
-                let ordered = bool_arg(a, 1).unwrap_or(false);
+                let items = string_items(present(args, 0))?;
+                let ordered = bool_arg(args, 1).unwrap_or(false);
                 let style = TextStyle {
-                    align: align_arg(a, 2)?,
-                    size: len_arg(a, 3, Unit::Pt, "size")?,
-                    color: color_arg(a, 4)?,
-                    font: str_arg(a, 5).filter(|s| !s.trim().is_empty()),
+                    align: align_arg(args, 2)?,
+                    size: len_arg(args, 3, Unit::Pt, "size")?,
+                    color: color_arg(args, 4)?,
+                    font: text_arg(args, 5),
                     ..TextStyle::default()
                 };
-                self.doc.blocks.push(Block::List { items, ordered, style });
-                Ok(self.this())
+                self.with(|i| i.doc.blocks.push(Block::List { items, ordered, style }));
+                Ok(ctx.this())
             }
             "table" => {
-                let header = bool_arg(a, 1).unwrap_or(true);
-                let data = table_rows(a.first(), header)?;
-                let unit = unit_arg(a, 4)?;
-                let columns: Option<Vec<Length>> = match present(a.get(2)) {
+                let header = bool_arg(args, 1).unwrap_or(true);
+                let data = table_rows(present(args, 0), header)?;
+                let unit = unit_arg(args, 4)?;
+                let columns = match present(args, 2) {
                     None => None,
                     Some(v) => {
                         let mut widths = Vec::new();
-                        for raw in string_items(Some(v)) {
+                        for raw in string_items(Some(v))? {
                             match raw.trim().parse::<f64>() {
-                                Ok(n) if n.is_finite() => {
-                                    widths.push(Length { value: n, unit })
-                                }
+                                Ok(n) if n.is_finite() => widths.push(Length { value: n, unit }),
                                 _ => {
-                                    return Err(CfmlError::runtime(format!(
+                                    return Err(Error::expression(format!(
                                         "Document.table(): column width [{}] is not a number",
                                         raw
                                     )))
@@ -461,13 +480,13 @@ impl CfmlNative for CfmlDocument {
                         Some(widths)
                     }
                 };
-                let aligns: Option<Vec<Align>> = match present(a.get(3)) {
+                let aligns = match present(args, 3) {
                     None => None,
                     Some(v) => {
                         let mut out = Vec::new();
-                        for raw in string_items(Some(v)) {
+                        for raw in string_items(Some(v))? {
                             out.push(Align::parse(&raw).ok_or_else(|| {
-                                CfmlError::runtime(format!(
+                                Error::expression(format!(
                                     "Document.table(): unknown alignment [{}]",
                                     raw
                                 ))
@@ -477,101 +496,95 @@ impl CfmlNative for CfmlDocument {
                     }
                 };
                 let style = TextStyle {
-                    size: len_arg(a, 5, Unit::Pt, "size")?,
-                    font: str_arg(a, 6).filter(|s| !s.trim().is_empty()),
+                    size: len_arg(args, 5, Unit::Pt, "size")?,
+                    font: text_arg(args, 6),
                     ..TextStyle::default()
                 };
-                self.doc.blocks.push(Block::Table { data, header, columns, aligns, style });
-                Ok(self.this())
+                self.with(|i| {
+                    i.doc.blocks.push(Block::Table { data, header, columns, aligns, style })
+                });
+                Ok(ctx.this())
             }
             "image" => {
-                let unit = unit_arg(a, 4)?;
-                let bytes = match present(a.first()) {
-                    Some(Value::Binary(b)) => b.clone(),
-                    Some(v) => {
-                        let path = v.as_string();
-                        std::fs::read(&path).map_err(|e| {
-                            CfmlError::runtime(format!(
-                                "Document.image(): unable to read [{}]: {}",
-                                path, e
-                            ))
-                        })?
-                    }
-                    None => {
-                        return Err(CfmlError::runtime(
-                            "Document.image(): a file path or binary is required".to_string(),
-                        ))
-                    }
+                let unit = unit_arg(args, 4)?;
+                let source = present(args, 0).ok_or_else(|| {
+                    Error::expression("Document.image(): a file path or binary is required")
+                })?;
+                let bytes = if source.kind() == rustcfml_module::abi::ty::BINARY {
+                    source.as_bytes()?.to_vec()
+                } else {
+                    let path = source.to_string();
+                    std::fs::read(&path).map_err(|e| {
+                        Error::new(format!("Document.image(): unable to read [{}]: {}", path, e))
+                    })?
                 };
                 let ext = image_extension(&bytes).ok_or_else(|| {
-                    CfmlError::runtime(
+                    Error::expression(
                         "Document.image(): unrecognised image data — PNG, JPEG, GIF and SVG are \
-                         supported"
-                            .to_string(),
+                         supported",
                     )
                 })?;
-                self.next_file += 1;
-                let file = format!("img{}.{}", self.next_file, ext);
-                self.doc.files.push((file.clone(), bytes));
-                self.doc.blocks.push(Block::Image {
-                    file,
-                    width: len_arg(a, 1, unit, "width")?,
-                    height: len_arg(a, 2, unit, "height")?,
-                    align: align_arg(a, 3)?,
+                let width = len_arg(args, 1, unit, "width")?;
+                let height = len_arg(args, 2, unit, "height")?;
+                let align = align_arg(args, 3)?;
+                self.with(|i| {
+                    i.next_file += 1;
+                    let file = format!("img{}.{}", i.next_file, ext);
+                    i.doc.files.push((file.clone(), bytes));
+                    i.doc.blocks.push(Block::Image { file, width, height, align });
                 });
-                Ok(self.this())
+                Ok(ctx.this())
             }
             "pagebreak" => {
-                self.doc.blocks.push(Block::PageBreak);
-                Ok(self.this())
+                self.with(|i| i.doc.blocks.push(Block::PageBreak));
+                Ok(ctx.this())
             }
             "rule" | "hr" => {
-                self.doc.blocks.push(Block::Rule);
-                Ok(self.this())
+                self.with(|i| i.doc.blocks.push(Block::Rule));
+                Ok(ctx.this())
             }
             "spacer" | "space" => {
-                let unit = unit_arg(a, 1)?;
-                let amount = len_arg(a, 0, unit, "amount")?
+                let unit = unit_arg(args, 1)?;
+                let amount = len_arg(args, 0, unit, "amount")?
                     .unwrap_or(Length { value: 1.0, unit: Unit::Em });
-                self.doc.blocks.push(Block::Spacer(amount));
-                Ok(self.this())
+                self.with(|i| i.doc.blocks.push(Block::Spacer(amount)));
+                Ok(ctx.this())
             }
             "typst" => {
-                // The escape hatch, and the ONLY place caller text becomes
-                // Typst code rather than a Typst string. Documented as such.
-                self.doc.blocks.push(Block::Raw(str_arg(a, 0).unwrap_or_default()));
-                Ok(self.this())
+                // The escape hatch, and the ONLY place caller text becomes Typst
+                // code rather than a Typst string literal.
+                let markup = str_arg(args, 0).unwrap_or_default();
+                self.with(|i| i.doc.blocks.push(Block::Raw(markup)));
+                Ok(ctx.this())
             }
 
             // ---- terminals --------------------------------------------------
-            "totypst" => Ok(Value::string(self.to_typst())),
-            "tobinary" | "topdf" => Ok(Value::Binary(self.to_pdf()?)),
+            "totypst" => Ok(ctx.string(self.to_typst())),
+            "tobinary" | "topdf" => Ok(ctx.binary(&self.to_pdf()?)),
             "pagecount" => {
-                let n = world::page_count_with_files(&self.to_typst(), &self.doc.files)
-                    .map_err(CfmlError::runtime)?;
-                Ok(Value::Int(n as i64))
+                let (markup, files) = self.with(|i| (emit::emit(&i.doc), i.doc.files.clone()));
+                let n = world::page_count_with_files(&markup, &files).map_err(Error::new)?;
+                Ok(ctx.int(n as i64))
             }
             "write" | "save" => {
-                let path = str_arg(a, 0).unwrap_or_default();
+                let path = str_arg(args, 0).unwrap_or_default();
                 if path.trim().is_empty() {
-                    return Err(CfmlError::runtime(
-                        "Document.write(): a file path is required".to_string(),
-                    ));
+                    return Err(Error::expression("Document.write(): a file path is required"));
                 }
-                let overwrite = bool_arg(a, 1).unwrap_or(true);
+                let overwrite = bool_arg(args, 1).unwrap_or(true);
                 if !overwrite && std::path::Path::new(&path).exists() {
-                    return Err(CfmlError::runtime(format!(
+                    return Err(Error::new(format!(
                         "Document.write(): [{}] already exists and overwrite is false",
                         path
                     )));
                 }
                 let pdf = self.to_pdf()?;
                 std::fs::write(&path, pdf).map_err(|e| {
-                    CfmlError::runtime(format!("Document.write(): unable to write [{}]: {}", path, e))
+                    Error::new(format!("Document.write(): unable to write [{}]: {}", path, e))
                 })?;
-                Ok(self.this())
+                Ok(ctx.this())
             }
-            other => Err(CfmlError::runtime(format!(
+            other => Err(Error::new(format!(
                 "Document has no method [{}]. Available: pageSize, orientation, margin, font, \
                  numbering, title, author, header, footer, heading, paragraph, list, table, \
                  image, pageBreak, rule, spacer, typst, toTypst, toBinary, pageCount, write.",
@@ -581,36 +594,16 @@ impl CfmlNative for CfmlDocument {
     }
 }
 
-/// Sniff an image's type from its bytes, not its filename — the same rule the
-/// engine's `imageRead` follows, and the extension Typst keys its decoder on.
-fn image_extension(bytes: &[u8]) -> Option<&'static str> {
-    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
-        Some("png")
-    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        Some("jpg")
-    } else if bytes.starts_with(b"GIF8") {
-        Some("gif")
-    } else if bytes
-        .iter()
-        .take(512)
-        .collect::<Vec<_>>()
-        .windows(4)
-        .any(|w| w == [&b'<', &b's', &b'v', &b'g'])
-    {
-        Some("svg")
-    } else {
-        None
-    }
-}
-
 /// `Document()` — a fresh, empty document.
-pub fn fn_document(_args: Vec<Value>) -> CfmlResult {
-    Ok(CfmlDocument::new().into_value())
+pub fn fn_document<'a>(ctx: &'a Ctx, _args: &[Value<'a>]) -> Result<Value<'a>> {
+    Ok(ctx.new_object(CfmlDocument::new()))
 }
 
 /// `IsDocumentObject( value )`
-pub fn fn_is_document_object(args: Vec<Value>) -> CfmlResult {
-    let is = matches!(args.first(), Some(Value::NativeObject(o))
-        if o.read().map(|g| g.class_name() == "Document").unwrap_or(false));
-    Ok(Value::Bool(is))
+pub fn fn_is_document_object<'a>(ctx: &'a Ctx, args: &[Value<'a>]) -> Result<Value<'a>> {
+    let is = args
+        .first()
+        .map(|v| v.native_class_name().map(|n| n == "Document").unwrap_or(false))
+        .unwrap_or(false);
+    Ok(ctx.bool(is))
 }

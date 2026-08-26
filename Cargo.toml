@@ -11,16 +11,15 @@ keywords     = ["cfml", "rustcfml", "typst", "pdf", "cfdocument"]
 categories   = ["template-engine"]
 
 [lib]
-# `rlib` is the contract `rustcfml --build` links (the "cocktail" path) and is
-# what works TODAY. `cdylib` is for the `.rcx` dynamic loader once its C ABI
-# lands — see docs/PLAN.md. Building both from one crate keeps the two delivery
-# modes on the same code.
-crate-type = ["rlib", "cdylib"]
+# `cdylib` is what a `.rcx` extension ships. `rlib` keeps the same source
+# linkable by the static `rustcfml --build` path.
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# Point this at your RustCFML checkout. Once rustcfml-cli ships on crates.io
-# this becomes a version dependency.
-rustcfml-cli = { path = "../RustCFML/crates/cli" }
+# The extension ABI wrapper — the ONLY RustCFML dependency. Building this module
+# no longer needs an engine checkout, a matching rustc, or the engine's
+# allocator: everything crosses as an opaque handle over a C ABI.
+rustcfml-module = { path = "../RustCFML/crates/rustcfml-module" }
 
 # Typst. Apache-2.0 throughout, already inside RustCFML's accepted licence set.
 typst         = "0.15"
