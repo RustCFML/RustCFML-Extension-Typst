@@ -1,0 +1,236 @@
+name: Release Extension
+
+on:
+  push:
+    tags: ["v*"]
+  # Buildable on demand, so the artifacts can be produced and smoke-tested
+  # without cutting a tag first.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  # The engine checkout this builds against.
+  #
+  # PINNED, not `main`. `rustcfml-module` is a PATH dependency (the wrapper is
+  # not on crates.io yet), so the engine tree IS a build input: an unpinned
+  # `main` would mean a tag of this repo produces different bytes depending on
+  # the day. It also documents the floor honestly — this is the oldest engine
+  # the produced .rcx is known to load into. Bump it deliberately.
+  RUSTCFML_REF: v0.635.1
+
+jobs:
+  # One job per platform, each producing a SINGLE-PLATFORM .rcx.
+  #
+  # `ext build` will happily merge a second platform's library into an existing
+  # archive (the "fat extension" shape), and that is right for hand-building a
+  # file you carry between two machines you own. It is the wrong shape to
+  # publish: every download would then carry four libraries so that one can be
+  # used, for a crate whose whole reason to be an extension is that it is large.
+  # A fresh checkout has no prior .rcx, so each job packages exactly its own.
+  build:
+    strategy:
+      # Do not cancel siblings: a Windows-only fault should not destroy the
+      # evidence from three healthy targets. (Same reasoning as the engine's
+      # release workflow.)
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            name: macos-aarch64
+            engine: rustcfml-macos-aarch64
+            exe: ""
+          - os: ubuntu-latest
+            name: linux-x86_64
+            engine: rustcfml-linux-x86_64
+            exe: ""
+          - os: ubuntu-24.04-arm
+            name: linux-aarch64
+            engine: rustcfml-linux-aarch64
+            exe: ""
+          - os: windows-latest
+            name: windows-x86_64
+            engine: rustcfml-windows-x86_64.exe
+            exe: ".exe"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      # Sibling checkouts, because Cargo.toml points at
+      # `../RustCFML/crates/rustcfml-module`.
+      - uses: actions/checkout@v5
+        with:
+          path: rustcfml-typst
+
+      - uses: actions/checkout@v5
+        with:
+          repository: RustCFML/RustCFML
+          ref: ${{ env.RUSTCFML_REF }}
+          path: RustCFML
+
+      # Plain `stable`, deliberately UNPINNED — the opposite of the engine's
+      # release workflow, and for a reason worth stating: an extension crosses
+      # the boundary as a C ABI over opaque handles, so it shares neither
+      # generics, layout, nor allocator with the host. Any rustc that can build
+      # a cdylib produces a loadable one. That independence is the point of the
+      # ABI; pinning here would quietly imply otherwise.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # The RELEASED engine binary, not one built from the checkout beside it.
+      # `ext build` embeds the host's own target triple and ABI major into the
+      # manifest, so the packaging tool must be the same engine an operator will
+      # install this into — otherwise CI can mint an archive keyed to a triple
+      # no released binary reports.
+      - name: Fetch the released engine
+        shell: bash
+        run: |
+          gh release download "$RUSTCFML_REF" \
+            --repo RustCFML/RustCFML \
+            --pattern '${{ matrix.engine }}' \
+            --output "rustcfml${{ matrix.exe }}"
+          chmod +x "rustcfml${{ matrix.exe }}"
+          ./rustcfml${{ matrix.exe }} --version
+          # Prints the ABI major and triple this engine speaks; the packaged
+          # manifest must agree, and the log is where you look when it doesn't.
+          ./rustcfml${{ matrix.exe }} ext --help
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # `shell: bash` on the Windows runner is the thing that broke the engine's
+      # own release at v0.595.0 — Git-Bash puts MSYS Perl ahead of Strawberry
+      # Perl, and vendored OpenSSL cannot configure for VC-WIN64A with it. It is
+      # safe here because nothing in this crate's graph builds OpenSSL: the
+      # dependencies are Typst, fontdb and the zero-dependency ABI crate. If a
+      # networking crate ever arrives, this is the step that will fail and this
+      # comment is why.
+      - name: Build and package the .rcx
+        shell: bash
+        run: ./rustcfml${{ matrix.exe }} ext build rustcfml-typst
+
+      # Loading it is the only check that means anything. A .rcx can be
+      # perfectly well-formed and still fail to load — a missing system library,
+      # a digest that does not match, an ABI major the host will not accept —
+      # and none of that is visible from packaging alone.
+      # Loading it is the only check that means anything. A .rcx can be
+      # perfectly well-formed and still fail to load — a missing system library,
+      # a digest that does not match, an ABI major the host will not accept —
+      # and none of that is visible from packaging alone.
+      - name: Install it into a stock engine and load it
+        shell: bash
+        run: |
+          set -e
+          RCX=$(ls rustcfml-typst/*.rcx)
+          # The default install location is ./extensions, which is also the
+          # first place a CLI run looks for the script's application directory.
+          ./rustcfml${{ matrix.exe }} ext install "$RCX"
+          ./rustcfml${{ matrix.exe }} ext list
+
+          # Deliberately font-free: `toTypst()` exercises the whole builder —
+          # the class registration, named-argument binding, the emitter — with
+          # no dependency on the runner having any font installed. A CI image
+          # with an empty font database would otherwise fail here for a reason
+          # that has nothing to do with the artifact.
+          cat > smoke.cfm <<'CFM'
+          <cfscript>
+          if ( !isDefined( "Document" ) ) {
+              throw( message="Document() was not registered — the extension did not load" );
+          }
+          markup = Document().title( "smoke" )
+                             .pageSize( paper="a4" )
+                             .heading( text="Hello", level=1 )
+                             .paragraph( text="literal ##set page(fill: black) stays literal" )
+                             .toTypst();
+          if ( !findNoCase( "Hello", markup ) ) {
+              throw( message="emitted markup is missing its heading" );
+          }
+          // The injection guard, checked on the shipped artifact and not only in
+          // the crate's own unit tests: caller text must never reach code mode.
+          // The paragraph above contains what looks like a Typst directive, and
+          // it has to come out wrapped as a string literal — `#"…"` — rather
+          // than as markup. Testing for the ABSENCE of `##set page` would be
+          // wrong: the builder legitimately emits its own at the top for page
+          // setup, which is how the first draft of this check failed.
+          //
+          // Note the doubled hashes throughout: a single `#` in a CFML string
+          // opens an interpolation, which is the whole reason the builder exists.
+          if ( !markup.find( '##"literal ##set page(fill: black) stays literal"' ) ) {
+              throw( message="caller text was not emitted as a Typst string literal" );
+          }
+          // The tier-3 path: a column mask is applied by calling the ENGINE's
+          // numberFormat back over the ABI, so this fails if the host does not
+          // provide extension capability tier 3. Still font-free.
+          q = queryNew( "item,amount", "varchar,decimal", [ [ "Widget", 1234.5 ] ] );
+          masked = Document().table(
+              data          = q,
+              columnFormats = { amount = { alignment = "right", numberFormat = "9,999.00" } }
+          ).toTypst();
+          if ( !masked.find( "1,234.50" ) ) {
+              throw( message="a column number mask did not reach the engine — is this host tier 3?" );
+          }
+
+          writeOutput( "loaded ok — #len( markup )# bytes of Typst emitted" & chr( 10 ) );
+          writeOutput( "engine-applied column mask: ok" & chr( 10 ) );
+          writeOutput( "typst version: #typstVersion()#" & chr( 10 ) );
+          writeOutput( "font faces visible to this host: #typstFontCount()#" & chr( 10 ) );
+          </cfscript>
+          CFM
+          ./rustcfml${{ matrix.exe }} smoke.cfm
+
+      - name: Name the artifact for its platform
+        shell: bash
+        run: |
+          RCX=$(ls rustcfml-typst/*.rcx)
+          BASE=$(basename "$RCX" .rcx)
+          mkdir -p dist
+          cp "$RCX" "dist/${BASE}-${{ matrix.name }}.rcx"
+          ls -l dist
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.name }}
+          path: dist/*.rcx
+
+  release:
+    needs: build
+    # A manual run should still build and smoke-test everything; it just must
+    # not try to publish a release for a tag that does not exist.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+
+      - name: Collect
+        run: |
+          mkdir -p release
+          find artifacts -name '*.rcx' -exec cp {} release/ \;
+          ls -l release
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          generate_release_notes: true
+          body: |
+            Install the file for **your platform** into a stock RustCFML engine:
+
+            ```sh
+            rustcfml ext install typst-<version>-linux-x86_64.rcx --user
+            rustcfml ext list
+            ```
+
+            …or drop it into your application's `extensions/` directory.
+
+            Each `.rcx` carries the library for one platform only. Install the
+            wrong one and the engine says so by name, listing what the archive
+            actually contains — it does not fail silently.
+
+            Built against RustCFML `${{ env.RUSTCFML_REF }}`, which is also the
+            minimum engine version.
+          files: release/*

@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # Kept in step with release.yml. See the note there on why this is pinned.
+  RUSTCFML_REF: v0.635.1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          path: rustcfml-typst
+
+      - uses: actions/checkout@v5
+        with:
+          repository: RustCFML/RustCFML
+          ref: ${{ env.RUSTCFML_REF }}
+          path: RustCFML
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Typst is ~93 crates; without a cache every push pays for all of them.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rustcfml-typst
+
+      - name: Format
+        working-directory: rustcfml-typst
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: rustcfml-typst
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The emitter's tests are the ones that matter most: they are where
+      # "caller text can never become Typst code" is actually enforced.
+      - name: Test
+        working-directory: rustcfml-typst
+        run: cargo test
+
+      # Packaging is a build step of its own and breaks on its own — a crate
+      # that compiles can still fail to produce a loadable .rcx (a renamed BIF
+      # the manifest no longer matches, a `crate-type` edit). Catch it on the
+      # branch, not at the tag.
+      - name: Package and load a .rcx
+        run: |
+          set -e
+          gh release download "$RUSTCFML_REF" \
+            --repo RustCFML/RustCFML \
+            --pattern 'rustcfml-linux-x86_64' \
+            --output rustcfml
+          chmod +x rustcfml
+          ./rustcfml ext build rustcfml-typst
+          ./rustcfml ext install "$(ls rustcfml-typst/*.rcx)"
+          ./rustcfml ext list
+          ./rustcfml -c 'if ( !isDefined( "Document" ) ) { throw( message="extension did not load" ); }
+                         writeOutput( Document().paragraph( text="ok" ).toTypst() );'
+          # The extension's own end-to-end suite. It compiles real Typst, so it
+          # needs fonts; ubuntu-latest images ship some, but assert rather than
+          # assume — a silent zero-font host would fail every compile check.
+          sudo apt-get update -qq && sudo apt-get install -y -qq fonts-dejavu-core
+          ./rustcfml -c 'if ( typstFontCount() EQ 0 ) { throw( message="no fonts on this runner" ); }
+                         writeOutput( "fonts: " & typstFontCount() );'
+          ./rustcfml ext install "$(ls rustcfml-typst/*.rcx)" --dir rustcfml-typst/examples/invoice/extensions
+          ./rustcfml rustcfml-typst/examples/invoice/selftest.cfm | tee /tmp/selftest.txt
+          grep -q 'all checks passed' /tmp/selftest.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
