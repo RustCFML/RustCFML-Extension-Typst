@@ -14,14 +14,7 @@
 //!           .write( expandPath( "/invoice.pdf" ) );
 //! ```
 //!
-//! # Why this is an extension and not part of the engine
-//!
-//! Typst is ~93 crates and **+31.6 MB** of binary. PDF *reading* belongs in the
-//! engine and is there already; document *authoring* is a much larger
-//! dependency for a capability not every application wants. Shipping it as a
-//! `.rcx` means you opt in by installing a file — and, because the extension
-//! ABI is a C ABI over opaque handles, this crate links neither the engine nor
-//! its allocator and does not care which rustc built the engine.
+//! Delivered as a `.rcx` extension: see RustCFML's `docs/extensions.md`.
 
 mod document;
 mod emit;
@@ -49,14 +42,14 @@ fn markup_arg<'a>(args: &[Value<'a>], fname: &str) -> Result<String> {
 /// `TypstCompile( markup )` → the PDF as a Binary.
 fn typst_compile<'a>(ctx: &'a Ctx, args: &[Value<'a>]) -> Result<Value<'a>> {
     let markup = markup_arg(args, "TypstCompile")?;
-    let pdf = world::compile_pdf(&markup).map_err(Error::new)?;
+    let pdf = world::compile_markup(&markup).map_err(Error::new)?;
     Ok(ctx.binary(&pdf))
 }
 
 /// `TypstPageCount( markup )` → how many pages it lays out to.
 fn typst_page_count<'a>(ctx: &'a Ctx, args: &[Value<'a>]) -> Result<Value<'a>> {
     let markup = markup_arg(args, "TypstPageCount")?;
-    let n = world::page_count(&markup).map_err(Error::new)?;
+    let n = world::page_count_markup(&markup).map_err(Error::new)?;
     Ok(ctx.int(n as i64))
 }
 
@@ -66,6 +59,59 @@ fn typst_page_count<'a>(ctx: &'a Ctx, args: &[Value<'a>]) -> Result<Value<'a>> {
 /// markup is wrong" produce very similar-looking failures otherwise.
 fn typst_font_count<'a>(ctx: &'a Ctx, _args: &[Value<'a>]) -> Result<Value<'a>> {
     Ok(ctx.int(world::font_count() as i64))
+}
+
+/// `TypstVersion()` → the Typst release this extension is built against.
+///
+/// Worth exposing because a template written against Typst 0.15 is not
+/// guaranteed to compile under a later one, and "which Typst is in there?" is
+/// otherwise unanswerable from CFML.
+fn typst_version<'a>(ctx: &'a Ctx, _args: &[Value<'a>]) -> Result<Value<'a>> {
+    Ok(ctx.string(world::version()))
+}
+
+/// `TypstRender( template, data [, root] )` → the PDF as a Binary.
+///
+/// The one-shot form of `Document().template( … ).data( … ).toBinary()`, for the
+/// common case where the template *is* the document and CFML only supplies the
+/// data. `data` reaches the template as a virtual `data.json`, serialised by the
+/// engine's own `serializeJSON`.
+fn typst_render<'a>(ctx: &'a Ctx, args: &[Value<'a>]) -> Result<Value<'a>> {
+    let path = match args.first() {
+        Some(v) if !v.is_null() => v.to_string(),
+        _ => {
+            return Err(Error::expression(
+                "TypstRender: a path to a .typ template is required",
+            ))
+        }
+    };
+    let root = args.get(2).filter(|v| !v.is_null()).map(|v| v.to_string());
+    let template = document::resolve_template_public(&path, root.as_deref())?;
+
+    let mut files = Vec::new();
+    if let Some(data) = args.get(1).filter(|v| !v.is_null()) {
+        let json = ctx
+            .call("serializeJSON", &[*data])
+            .map(|r| r.to_string())
+            .map_err(|e| {
+                Error::new(format!(
+                    "TypstRender: could not serialise the data ({}). This needs an engine that \
+                     provides extension capability tier 3.",
+                    e
+                ))
+            })?;
+        files.push(("data.json".to_string(), json.into_bytes()));
+    }
+
+    let pdf = world::compile_pdf(&world::Job {
+        markup: None,
+        template: Some(template),
+        files,
+        pdf: Default::default(),
+        has_text: true,
+    })
+    .map_err(Error::new)?;
+    Ok(ctx.binary(&pdf))
 }
 
 /// Once per process, before any request. Enumerating the host's fonts took
@@ -85,6 +131,8 @@ module! {
         "typstCompile"     => typst_compile,
         "typstPageCount"   => typst_page_count,
         "typstFontCount"   => typst_font_count,
+        "typstVersion"     => typst_version,
+        "typstRender"      => typst_render,
     },
     classes: { CfmlDocument },
     on_load: warm_fonts,

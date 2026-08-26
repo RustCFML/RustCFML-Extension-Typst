@@ -112,6 +112,11 @@ and `counter(page)`, which is a genuinely good fit.
 
 ## 5. Phase order
 
+**Phases 1-3 and 6 are DONE, and templates — the §6 open question — shipped
+alongside them (2026-08-26).** What remains is phases 4 and 5: the HTML→Typst
+translator and `<cfdocument>` lowering. `docs/typst-coverage.md` is the audit of
+what Typst can do that this still does not expose.
+
 **Phases 1-3 are DONE** (2026-08-26) — the builder, the escaping/injection
 tests, and images/headers/footers/styling all shipped together, because the
 escaping decision (everything is a Typst *string literal*, every verb is code
@@ -138,6 +143,17 @@ Phases 1–4 need **no engine change at all**. Phase 5 needs one small one.
 1. Confirm the HTML subset in §4 before writing the translator.
 2. `.rcx` first, or the fluent builder first? The builder is useful immediately
    and is the better shakedown for the ABI, which argues for builder-first.
-3. Should `Document()` also accept a Typst *template file*, so designers can own
-   the layout and CFML only supplies data? That is Typst's real strength and may
-   matter more than `<cfdocument>` parity.
+3. ~~Should `Document()` also accept a Typst *template file*, so designers can own
+   the layout and CFML only supplies data?~~ **Answered: yes, and it should come
+   first.** Having written the builder, templates look like the higher-leverage of
+   the two remaining directions — more so than `<cfdocument>` parity, because a
+   template root also unblocks show rules, `#let`, data loading and
+   bibliographies, none of which can resolve while the `World` serves a single
+   source file. The design and the security boundary it needs are in
+   [typst-coverage.md](typst-coverage.md) §4, along with the rest of the
+   exposed/not-exposed audit.
+
+   The one decision inside it worth restating: the caller's data is registered as
+   a **virtual `data.json`** for the template to `json()`, not injected as
+   generated `#let` code. That keeps the property the builder already has — your
+   values are data and can never become Typst code.

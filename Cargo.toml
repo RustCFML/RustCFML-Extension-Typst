@@ -5,10 +5,14 @@ edition      = "2021"
 rust-version = "1.85"
 license      = "MIT OR Apache-2.0"
 description  = "Typst-backed document generation for RustCFML — a fluent Document() builder and <cfdocument> support, as a native module."
-repository   = "https://github.com/RustCFML/rustcfml-typst"
+repository   = "https://github.com/RustCFML/Extension-Typst"
 readme       = "README.md"
 keywords     = ["cfml", "rustcfml", "typst", "pdf", "cfdocument"]
 categories   = ["template-engine"]
+# Not on crates.io: this is distributed as a `.rcx`, built per platform. It also
+# keeps the crate out of its own THIRD-PARTY.txt, which cargo-about would
+# otherwise list as one of its own third-party dependencies.
+publish      = false
 
 [lib]
 # `cdylib` is what a `.rcx` extension ships. `rlib` keeps the same source
