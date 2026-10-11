@@ -6,6 +6,9 @@ Document generation for [RustCFML](https://github.com/RustCFML/RustCFML), backed
 [**`.rcx` extension**](https://github.com/RustCFML/RustCFML/blob/main/docs/extensions.md)
 you install into a stock engine.
 
+![Static Badge](https://img.shields.io/badge/RustCFML-Powered-orange?labelColor=orange&color=grey)
+
+
 > **Status: both ways of making a document work.**
 >
 > * the fluent **`Document()` builder** — page setup, headings, rich inline text
